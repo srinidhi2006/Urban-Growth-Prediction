@@ -16,18 +16,21 @@ def mask_s2_clouds_advanced(image: ee.Image) -> ee.Image:
     Returns:
         ee.Image: Cloud-masked Sentinel-2 image.
     """
+    # Cast to ee.Image explicitly to handle cases where GEE evaluates the item as a feature
+    img = ee.Image(image)
+    
     # 1. QA60 Masking
-    qa = image.select("QA60")
+    qa = img.select("QA60")
     cloud_bit_mask = 1 << 10
     cirrus_bit_mask = 1 << 11
     qa_mask = qa.bitwiseAnd(cloud_bit_mask).eq(0).And(
               qa.bitwiseAnd(cirrus_bit_mask).eq(0))
               
     # 2. Cloud Probability Masking
-    has_prob = image.propertyNames().contains("cloud_mask")
+    has_prob = img.propertyNames().contains("cloud_mask")
     
     # Retrieve probability and create threshold mask
-    cloud_prob_img = ee.Image(image.get("cloud_mask"))
+    cloud_prob_img = ee.Image(img.get("cloud_mask"))
     prob = cloud_prob_img.select("probability")
     prob_mask = prob.lt(Config.SATELLITE_CLOUD_PROBABILITY_THRESHOLD)
     
@@ -37,9 +40,9 @@ def mask_s2_clouds_advanced(image: ee.Image) -> ee.Image:
     # Return masked image based on property availability
     final_mask = ee.Image(ee.Algorithms.If(has_prob, combined_mask, qa_mask))
     
-    return image.updateMask(final_mask)
+    return img.updateMask(final_mask)
 
-def execute_quality_check(image: ee.Image, boundary: ee.Geometry) -> dict:
+def execute_quality_check(image: ee.Image, boundary: ee.Geometry, reference_image: ee.Image = None) -> dict:
     """Verifies that the compiled image composite meets quality requirements.
     
     Validates bands presence, resolution matches, CRS definitions, and valid (unmasked)
@@ -48,6 +51,7 @@ def execute_quality_check(image: ee.Image, boundary: ee.Geometry) -> dict:
     Args:
         image (ee.Image): Clipped image composite to inspect.
         boundary (ee.Geometry): Administrative study boundary.
+        reference_image (ee.Image, optional): An un-composited source image to verify the underlying resolution/scale.
         
     Returns:
         dict: Diagnostic metrics including quality check execution status.
@@ -59,7 +63,8 @@ def execute_quality_check(image: ee.Image, boundary: ee.Geometry) -> dict:
         missing_bands = [b for b in Config.QC_EXPECTED_BANDS if b not in band_names]
         
         # 2. CRS & Scale validation (Use the first band, e.g. B2)
-        proj = image.select(Config.QC_EXPECTED_BANDS[0]).projection()
+        proj_image = reference_image if reference_image is not None else image
+        proj = proj_image.select(Config.QC_EXPECTED_BANDS[0]).projection()
         crs = proj.crs().getInfo()
         nominal_scale = proj.nominalScale().getInfo()
         
@@ -178,7 +183,7 @@ def build_sentinel_composite(
         leftField="system:index",
         rightField="system:index"
     )
-    joined_collection = join.apply(s2_sr, s2_cloud_prob, filter_by_id)
+    joined_collection = ee.ImageCollection(join.apply(s2_sr, s2_cloud_prob, filter_by_id))
     
     # Get collection size
     image_count = int(joined_collection.size().getInfo())
@@ -196,6 +201,7 @@ def build_sentinel_composite(
     selected_composite = composite.select(Config.SATELLITE_BANDS).clip(boundary)
     
     # 6. Quality Check
-    qc_metrics = execute_quality_check(selected_composite, boundary)
+    first_image = ee.Image(joined_collection.first())
+    qc_metrics = execute_quality_check(selected_composite, boundary, reference_image=first_image)
     
     return selected_composite, qc_metrics, image_count

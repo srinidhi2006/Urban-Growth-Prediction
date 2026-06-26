@@ -215,30 +215,44 @@ def download_locally(
             )
             return False
             
-        # Parse returned zip contents in-memory
-        zip_bytes = io.BytesIO(response.content)
-        with zipfile.ZipFile(zip_bytes) as z:
-            file_list = z.namelist()
-            tif_files = [f for f in file_list if f.endswith(".tif")]
-            
-            if not tif_files:
-                logger.error("No GeoTIFF found inside the downloaded GEE zip archive.")
-                return False
+        # Check if the response is a ZIP file or a direct GeoTIFF
+        content_type = response.headers.get("content-type", "").lower()
+        is_zip = response.content.startswith(b"PK\x03\x04") or "zip" in content_type
+        
+        if is_zip:
+            logger.info("Response is a ZIP archive. Extracting GeoTIFF...")
+            zip_bytes = io.BytesIO(response.content)
+            with zipfile.ZipFile(zip_bytes) as z:
+                file_list = z.namelist()
+                tif_files = [f for f in file_list if f.endswith(".tif")]
                 
-            # Sentinel-2 raw download may write bands as single or separate files.
-            # Usually multi-band images download as "sentinel_image.tif" or separate bands if partitioned.
-            # We extract and write the primary tif.
-            target_name = tif_files[0]
-            logger.info(f"Extracting {target_name} from archive...")
-            
-            # Write extracted content directly to output path
+                if not tif_files:
+                    logger.error("No GeoTIFF found inside the downloaded GEE zip archive.")
+                    return False
+                    
+                target_name = tif_files[0]
+                logger.info(f"Extracting {target_name} from archive...")
+                
+                # Write extracted content directly to output path
+                output_tif_path.parent.mkdir(parents=True, exist_ok=True)
+                with open(output_tif_path, "wb") as f:
+                    f.write(z.read(target_name))
+        else:
+            logger.info("Response is a direct GeoTIFF image. Saving to output path...")
             output_tif_path.parent.mkdir(parents=True, exist_ok=True)
             with open(output_tif_path, "wb") as f:
-                f.write(z.read(target_name))
+                f.write(response.content)
                 
         logger.success(f"GeoTIFF downloaded and saved successfully at: {output_tif_path}")
         return True
         
+    except zipfile.BadZipFile as e:
+        try:
+            error_msg = response.content.decode("utf-8")
+            logger.error(f"GEE returned a non-zip response payload. Server message: {error_msg}")
+        except Exception:
+            logger.error("GEE returned a non-zip response that could not be decoded.")
+        return False
     except Exception as e:
         logger.error(
             f"Local direct download failed: {e}\n"

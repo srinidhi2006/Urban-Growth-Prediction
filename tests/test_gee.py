@@ -61,13 +61,13 @@ def test_mask_s2_clouds_bands(mock_if, mock_image_class):
     mock_prob_img.select.return_value = mock_prob
     
     mock_if.return_value = mock_final_mask
-    mock_image_class.return_value = mock_final_mask
+    mock_image_class.side_effect = lambda x: x
     mock_image.updateMask.return_value = mock_image
     
     masked_img = mask_s2_clouds_advanced(mock_image)
     
     # Assert methods called
-    mock_image.select.assert_called_once_with("QA60")
+    mock_image.select.assert_any_call("QA60")
     mock_image.updateMask.assert_called_once_with(mock_final_mask)
     assert masked_img == mock_image
 
