@@ -1,0 +1,71 @@
+# ==============================================================================
+# AI-Powered Urban Growth Prediction Platform - Git Ignore Rules
+# ==============================================================================
+
+# --- Python Bytecode & Cache ---
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+.coverage
+htmlcov/
+.mypy_cache/
+.ipynb_checkpoints/
+
+# --- Virtual Environments ---
+venv/
+.venv/
+env/
+ENV/
+bin/
+lib/
+include/
+
+# --- IDE Configurations ---
+.vscode/
+.idea/
+*.suo
+*.ntvs*
+*.njsproj
+*.sln
+*.swp
+*.swo
+
+# --- Local Environment & Secrets ---
+.env
+.env.local
+.env.*.local
+! .env.example
+
+# --- Earth Engine & Cloud Credentials ---
+.config/earthengine/
+credentials.json
+*.pem
+*.key
+*.json
+!pyproject.toml
+
+# --- Application Logs ---
+logs/*
+!logs/.gitkeep
+*.log
+
+# --- Data Folders (Exclude massive geotiffs, raw files, but keep directory structure) ---
+data/**/*
+!data/**/.gitkeep
+
+# --- Artifacts (Trained models, scalers, metric dumps) ---
+artifacts/**/*
+!artifacts/**/.gitkeep
+
+# --- Power BI Temporary Files ---
+*.pbix.tmp
+*.pbit
+*.pmsf
+*.pbi
+
+# --- OS System Files ---
+Thumbs.db
+EHthumbs.db
+Desktop.ini
+.DS_Store

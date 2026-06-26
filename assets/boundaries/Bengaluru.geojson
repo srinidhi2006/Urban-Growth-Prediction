@@ -1,0 +1,23 @@
+{
+  "type": "FeatureCollection",
+  "features": [
+    {
+      "type": "Feature",
+      "properties": {
+        "name": "Bengaluru"
+      },
+      "geometry": {
+        "type": "Polygon",
+        "coordinates": [
+          [
+            [77.460, 12.800],
+            [77.780, 12.800],
+            [77.780, 13.140],
+            [77.460, 13.140],
+            [77.460, 12.800]
+          ]
+        ]
+      }
+    }
+  ]
+}

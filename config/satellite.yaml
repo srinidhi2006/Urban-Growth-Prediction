@@ -1,0 +1,45 @@
+# ==============================================================================
+# AI-Powered Urban Growth Prediction Platform - Satellite Collection Settings
+# ==============================================================================
+
+sentinel:
+  # GEE collections
+  collection: "COPERNICUS/S2_SR_HARMONIZED"
+  cloud_probability_collection: "COPERNICUS/S2_CLOUD_PROBABILITY"
+  
+  # Max cloud probability threshold (0-100). Pixels above this are masked.
+  # Recommended range is 50-70.
+  cloud_probability_threshold: 60
+  
+  # Maximum cloudy pixel percentage threshold per image in GEE initial metadata filter
+  cloud_percentage: 20
+  
+  # Pixel resolution in meters (Sentinel-2 multispectral is native 10m)
+  scale: 10
+  
+  # Spatial Coordinate Reference System for downloads (WGS84)
+  export_crs: "EPSG:4326"
+  
+  # Bands to extract (B2: Blue, B3: Green, B4: Red, B8: NIR, B11: SWIR1, B12: SWIR2)
+  bands:
+    - "B2"
+    - "B3"
+    - "B4"
+    - "B8"
+    - "B11"
+    - "B12"
+    
+  # Quality check parameters
+  quality_check:
+    # Minimum ratio of valid, unmasked pixels within the administrative boundary
+    min_cloud_free_ratio: 0.3
+    # Resolution limits check
+    expected_resolution: 10
+    # Expected band list validation
+    expected_bands:
+      - "B2"
+      - "B3"
+      - "B4"
+      - "B8"
+      - "B11"
+      - "B12"

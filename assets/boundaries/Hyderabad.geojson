@@ -1,0 +1,23 @@
+{
+  "type": "FeatureCollection",
+  "features": [
+    {
+      "type": "Feature",
+      "properties": {
+        "name": "Hyderabad"
+      },
+      "geometry": {
+        "type": "Polygon",
+        "coordinates": [
+          [
+            [78.230, 17.180],
+            [78.620, 17.180],
+            [78.620, 17.580],
+            [78.230, 17.580],
+            [78.230, 17.180]
+          ]
+        ]
+      }
+    }
+  ]
+}
