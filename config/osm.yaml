@@ -1,0 +1,41 @@
+# ==============================================================================
+# AI-Powered Urban Growth Prediction Platform - OSM Pipeline Configuration
+# ==============================================================================
+
+osm:
+  # Network connection and query retry options
+  timeout: 180
+  max_retries: 5
+  
+  # Target grid cell resolution in meters (1 km)
+  grid_size_meters: 1000
+  
+  # Feature extraction tag specifications
+  tags:
+    buildings:
+      building: true
+    green_areas:
+      landuse:
+        - forest
+        - meadow
+        - grass
+        - recreation_ground
+        - village_green
+        - allotments
+        - cemetery
+        - orchard
+        - vineyard
+      leisure:
+        - park
+        - garden
+        - golf_course
+        - nature_reserve
+    roads:
+      highway: true
+      
+  # Road classes to consider major highways for distance metrics
+  major_highways:
+    - motorway
+    - trunk
+    - primary
+    - secondary

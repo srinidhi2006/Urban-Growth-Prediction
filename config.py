@@ -50,10 +50,6 @@ class Config:
     GEE_SERVICE_ACCOUNT_EMAIL: str = os.getenv("GEE_SERVICE_ACCOUNT_EMAIL", "")
     GEE_SERVICE_ACCOUNT_KEY_PATH: str = os.getenv("GEE_SERVICE_ACCOUNT_KEY_PATH", "")
     
-    # --- OSM Settings ---
-    OSM_TIMEOUT: int = int(os.getenv("OSM_TIMEOUT", "180"))
-    OSM_MAX_RETRIES: int = int(os.getenv("OSM_MAX_RETRIES", "5"))
-    
     # --- Model Hyperparameters ---
     DEFAULT_TRAIN_TEST_SPLIT: float = float(os.getenv("DEFAULT_TRAIN_TEST_SPLIT", "0.8"))
     EFFICIENTNET_BATCH_SIZE: int = int(os.getenv("EFFICIENTNET_BATCH_SIZE", "32"))
@@ -100,6 +96,24 @@ class Config:
     QC_MIN_CLOUD_FREE_RATIO: float = float(_sat_config.get("quality_check", {}).get("min_cloud_free_ratio", 0.3))
     QC_EXPECTED_RESOLUTION: int = int(_sat_config.get("quality_check", {}).get("expected_resolution", 10))
     QC_EXPECTED_BANDS: list = _sat_config.get("quality_check", {}).get("expected_bands", ["B2", "B3", "B4", "B8", "B11", "B12"])
+
+    # --- Load osm.yaml settings ---
+    _osm_config_path = PROJECT_ROOT / "config" / "osm.yaml"
+    _osm_config = {}
+    if _osm_config_path.exists():
+        try:
+            with open(_osm_config_path, "r") as f:
+                _osm_config = yaml.safe_load(f).get("osm", {})
+        except Exception as e:
+            print(f"Warning: Failed to load osm.yaml config: {e}")
+
+    OSM_TIMEOUT: int = int(_osm_config.get("timeout", 180))
+    OSM_MAX_RETRIES: int = int(_osm_config.get("max_retries", 5))
+    OSM_GRID_SIZE_METERS: int = int(_osm_config.get("grid_size_meters", 1000))
+    OSM_TAGS_BUILDINGS: dict = _osm_config.get("tags", {}).get("buildings", {"building": True})
+    OSM_TAGS_GREEN_AREAS: dict = _osm_config.get("tags", {}).get("green_areas", {})
+    OSM_TAGS_ROADS: dict = _osm_config.get("tags", {}).get("roads", {"highway": True})
+    OSM_MAJOR_HIGHWAYS: list = _osm_config.get("major_highways", ["motorway", "trunk", "primary", "secondary"])
 
     @classmethod
     def initialize_directories(cls):
