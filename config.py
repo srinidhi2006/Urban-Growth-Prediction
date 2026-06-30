@@ -97,6 +97,18 @@ class Config:
     QC_EXPECTED_RESOLUTION: int = int(_sat_config.get("quality_check", {}).get("expected_resolution", 10))
     QC_EXPECTED_BANDS: list = _sat_config.get("quality_check", {}).get("expected_bands", ["B2", "B3", "B4", "B8", "B11", "B12"])
 
+    # --- Load sentinel.yaml settings ---
+    _sentinel_config_path = PROJECT_ROOT / "config" / "sentinel.yaml"
+    _sentinel_config = {}
+    if _sentinel_config_path.exists():
+        try:
+            with open(_sentinel_config_path, "r") as f:
+                _sentinel_config = yaml.safe_load(f).get("sentinel", {})
+        except Exception as e:
+            print(f"Warning: Failed to load sentinel.yaml config: {e}")
+
+    SENTINEL_TILE_SIZE_METERS: int = int(_sentinel_config.get("tile_size_meters", 5000))
+
     # --- Load osm.yaml settings ---
     _osm_config_path = PROJECT_ROOT / "config" / "osm.yaml"
     _osm_config = {}
