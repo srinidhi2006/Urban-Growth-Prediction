@@ -11,13 +11,6 @@ def min_max_scale(series):
         return series * 0.0
     return (series - s_min) / (s_max - s_min)
 
-def get_change_category(score):
-    if score < 0.33:
-        return "Low"
-    elif score < 0.66:
-        return "Medium"
-    else:
-        return "High"
 
 def compute_growth_score() -> bool:
     try:
@@ -94,8 +87,19 @@ def compute_growth_score() -> bool:
             )
             df_city["urban_change_index"] = min_max_scale(raw_uci)
             
-            # Compute Change Category
-            df_city["change_category"] = df_city["urban_change_index"].apply(get_change_category)
+            # Compute Change Category using quantile-based classification within each city separately
+            q33 = df_city["urban_change_index"].quantile(0.33)
+            q66 = df_city["urban_change_index"].quantile(0.66)
+            
+            def get_quantile_category(val):
+                if val <= q33:
+                    return "Low"
+                elif val <= q66:
+                    return "Medium"
+                else:
+                    return "High"
+            
+            df_city["change_category"] = df_city["urban_change_index"].apply(get_quantile_category)
             
             # Ensure correct column ordering
             output_cols = (

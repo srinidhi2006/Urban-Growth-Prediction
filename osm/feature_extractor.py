@@ -61,10 +61,10 @@ def extract_osm_features(city: str, boundary_gdf: gpd.GeoDataFrame) -> bool:
         logger.info(f"[{city}] Extracting building features...")
         b_counts = buildings_joined.groupby("grid_id").size().reindex(grid["grid_id"], fill_value=0)
         
-        # Compute building area inside each cell
+        # Compute building area inside each cell (Sum areas of pre-clipped buildings)
         if not buildings_joined.empty:
             b_areas = buildings_joined.groupby("grid_id").apply(
-                lambda x: x.geometry.union_all().area if hasattr(x.geometry, "union_all") else x.geometry.unary_union.area,
+                lambda x: x.geometry.area.sum(),
                 include_groups=False
             )
             b_areas = b_areas.reindex(grid["grid_id"], fill_value=0.0)
@@ -145,11 +145,11 @@ def extract_osm_features(city: str, boundary_gdf: gpd.GeoDataFrame) -> bool:
             
         grid["distance_to_highway"] = dist_map.values
         
-        # 5. Green Area and Green Ratio
+        # 5. Green Area and Green Ratio (Sum areas of green polygons)
         logger.info(f"[{city}] Extracting green space metrics...")
         if not green_joined.empty:
             g_areas = green_joined.groupby("grid_id").apply(
-                lambda x: x.geometry.union_all().area if hasattr(x.geometry, "union_all") else x.geometry.unary_union.area,
+                lambda x: x.geometry.area.sum(),
                 include_groups=False
             )
             g_areas = g_areas.reindex(grid["grid_id"], fill_value=0.0)
