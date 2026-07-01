@@ -180,6 +180,21 @@ class NumberedCanvas(canvas.Canvas):
             
             self.restoreState()
 
+# Normalization mapping for standard aliases
+ALIAS_MAPPING = {
+    "bombay": "Mumbai",
+    "bangalore": "Bengaluru",
+    "mysore": "Mysuru",
+    "new delhi": "Delhi",
+    "madras": "Chennai",
+    "calcutta": "Kolkata",
+    "poona": "Pune"
+}
+
+def normalize_city_name(name: str) -> str:
+    cleaned = name.strip().lower()
+    return ALIAS_MAPPING.get(cleaned, name.strip())
+
 def geocode_city_boundary_frontend(city_name: str) -> bool:
     boundary_path = Config.BOUNDARIES_DIR / f"{city_name}.geojson"
     if boundary_path.exists():
