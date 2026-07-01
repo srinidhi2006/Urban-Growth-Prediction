@@ -186,7 +186,7 @@ def compute_city_growth_features(city_name: str) -> pd.DataFrame:
     df_city["change_category"] = df_city["urban_change_index"].apply(get_category)
     return df_city
 
-def analyze_city(city_name: str, year: int = 2026) -> dict:
+def analyze_city(city_name: str, year: int = 2026, status_callback=None) -> dict:
     """Performs the complete end-to-end urban change index predictions and explainability for any city."""
     logger.info(f"Received backend analysis query for City: {city_name} (Timeline target: {year})")
     
@@ -198,19 +198,40 @@ def analyze_city(city_name: str, year: int = 2026) -> dict:
     prediction_file = pred_out_dir / "prediction_results.csv"
     summary_file = pred_out_dir / "prediction_summary.json"
     shap_file = pred_out_dir / "shap_values.csv"
+    status_file = pred_out_dir / "status.json"
     
+    def update_status(step: str, progress: int, status: str = "processing"):
+        status_data = {
+            "status": status,
+            "step": step,
+            "progress": progress
+        }
+        try:
+            with open(status_file, "w") as sf:
+                json.dump(status_data, sf, indent=4)
+        except Exception as e:
+            logger.error(f"Failed to write status file: {e}")
+            
+        if status_callback:
+            try:
+                status_callback(step, progress, status)
+            except Exception as e:
+                logger.error(f"Status callback failed: {e}")
+                
     city_features_path = Config.FEATURES_DIR / f"{city_name.lower()}_growth_dataset.csv"
     
     # --- STEP 1: Check Cache / Cache Load ---
     if city_features_path.exists():
         logger.info(f"Processed dataset found in cache at: {city_features_path.name}. Skipping ingestion stages.")
+        update_status("Loading Cached Features", 90)
         df_features = pd.read_csv(city_features_path)
     else:
         # --- STEP 2: Execute modular extraction pipeline ---
         logger.info(f"City '{city_name}' has not been processed. Initiating download and feature engineering stages...")
-        boundary_path = Config.BOUNDARIES_DIR / f"{city_name}.geojson"
         
         # 1. Boundary geocoding
+        update_status("Downloading administrative boundary", 10)
+        boundary_path = Config.BOUNDARIES_DIR / f"{city_name}.geojson"
         if not boundary_path.exists():
             success = download_boundary(city_name, boundary_path)
             if not success:
@@ -219,21 +240,30 @@ def analyze_city(city_name: str, year: int = 2026) -> dict:
         boundary_gdf = gpd.read_file(boundary_path)
         
         # 2. OSM pipeline
+        update_status("Downloading OSM data", 20)
         download_osm_data(city_name, boundary_gdf)
+        
+        update_status("Cleaning OSM data", 30)
         clean_osm_data(city_name, boundary_gdf)
+        
+        update_status("Generating spatial grid", 40)
         generate_spatial_grid(city_name, boundary_gdf)
+        
+        update_status("Joining spatial data", 50)
         join_spatial_data(city_name)
+        
+        update_status("Extracting OSM features", 60)
         extract_osm_features(city_name, boundary_gdf)
         validate_osm_features(city_name)
         
         # 3. Sentinel-2 composite and spectral calculations
+        update_status("Generating Sentinel imagery", 70)
         sentinel_ok = run_sentinel_download_stages(city_name, boundary_gdf)
         if not sentinel_ok:
             logger.warning(f"GEE download stages failed. Creating simulated raster statistics to prevent backend crashes...")
             osm_feat_path = Config.FEATURES_DIR / f"osm_features_{city_name}.csv"
             osm_df = pd.read_csv(osm_feat_path)
             
-            # Fill mean ndvi/ndbi/ndwi with reasonable random numbers
             for y in [2019, 2026]:
                 mock_df = osm_df.copy()
                 mock_df["mean_ndvi"] = np.random.uniform(0.1, 0.4, len(mock_df))
@@ -243,44 +273,37 @@ def analyze_city(city_name: str, year: int = 2026) -> dict:
                 out_feat = Config.FEATURES_DIR / f"ml_features_{city_name}_{y}.csv"
                 mock_df.to_csv(out_feat, index=False)
                 
-        # Extract Sentinel raster features onto grid cells
+        update_status("Extracting raster features", 80)
         extract_raster_features(city_name, 2019)
         extract_raster_features(city_name, 2026)
         
-        # Merge columns and construct change indexes
+        update_status("Generating ML feature dataset", 85)
         df_features = compute_city_growth_features(city_name)
-        # Save to cache folder
         df_features.to_csv(city_features_path, index=False)
         logger.success(f"Successfully processed features for {city_name} and saved to cache.")
         
     # --- STEP 3: Load Model & Preprocess features ---
+    update_status("Loading trained production model", 92)
     model_tuned_path = project_root / "models" / "xgboost_tuned_model.pkl"
     model_base_path = project_root / "models" / "xgboost_model.pkl"
     
-    # Standardize loading production model
     model_path = model_tuned_path if model_tuned_path.exists() else model_base_path
     logger.info(f"Loading production model from: {model_path.name}")
     with open(model_path, "rb") as f:
         model = pickle.load(f)
         
-    # Pre-scale features
     scaler_path = project_root / "data" / "ml" / "scaler.pkl"
     with open(scaler_path, "rb") as f:
         scaler = pickle.load(f)
         
-    # Standard feature alignment
     X = df_features.copy()
     grid_ids = X["grid_id"].copy()
-    
-    # Drop identifiers and targets
     X = X.drop(columns=["grid_id", "change_category", "urban_change_index"])
     
-    # Create required city one-hot columns
     X["city_Bengaluru"] = 0
     X["city_Hyderabad"] = 0
     X["city_Pune"] = 0
     
-    # Re-order columns to match the exactly expected training schema columns
     expected_cols = [
         "building_count", "building_area_ratio", "road_length", "distance_to_highway",
         "green_area", "distance_to_center",
@@ -293,24 +316,19 @@ def analyze_city(city_name: str, year: int = 2026) -> dict:
     ]
     X = X[expected_cols]
     
-    # Standardize numerical features using loaded scaler
     numeric_features = [col for col in expected_cols if not col.startswith("city_")]
     X_scaled = X.copy()
     X_scaled[numeric_features] = scaler.transform(X[numeric_features])
     
-    # --- STEP 4: Generate Model Predictions ---
-    logger.info("Generating urban growth predictions...")
+    # --- STEP 4: Generate Predictions ---
+    update_status("Generating predictions", 95)
     y_pred = model.predict(X_scaled)
     y_prob = model.predict_proba(X_scaled)
-    
-    # Extract prediction probability of the chosen class
     pred_probabilities = y_prob[np.arange(len(y_pred)), y_pred]
     
-    # Decode target categories (0 -> High, 1 -> Low, 2 -> Medium)
     cat_mapping = {0: "High", 1: "Low", 2: "Medium"}
     pred_categories = [cat_mapping[val] for val in y_pred]
     
-    # Save predictions results table
     df_predictions = pd.DataFrame({
         "grid_id": grid_ids,
         "growth_score": df_features["urban_change_index"],
@@ -318,23 +336,20 @@ def analyze_city(city_name: str, year: int = 2026) -> dict:
         "prediction_probability": pred_probabilities
     })
     df_predictions.to_csv(prediction_file, index=False)
-    logger.success(f"Saved predictions CSV to: {prediction_file}")
     
-    # --- STEP 5: Generate SHAP Explanations ---
-    logger.info("Calculating local SHAP values...")
+    # --- STEP 5: Generate SHAP explanations ---
+    update_status("Generating SHAP explanations", 98)
     explainer = shap.TreeExplainer(model)
     shap_values = explainer.shap_values(X_scaled)
     
-    # Save the SHAP values of the predicted class for each cell
     df_shap = pd.DataFrame(index=X_scaled.index)
     df_shap["grid_id"] = grid_ids
     for f_idx, feat in enumerate(expected_cols):
         df_shap[feat] = shap_values[np.arange(len(y_pred)), f_idx, y_pred]
-        
     df_shap.to_csv(shap_file, index=False)
-    logger.success(f"Saved SHAP values CSV to: {shap_file}")
     
-    # --- STEP 6: Compute Summary Statistics and save summary JSON ---
+    # --- STEP 6: Save outputs & finalize ---
+    update_status("Finalizing results", 99)
     category_counts = pd.Series(pred_categories).value_counts()
     high_count = int(category_counts.get("High", 0))
     med_count = int(category_counts.get("Medium", 0))
@@ -357,10 +372,11 @@ def analyze_city(city_name: str, year: int = 2026) -> dict:
     
     with open(summary_file, "w") as sf:
         json.dump(summary_report, sf, indent=4)
-    logger.success(f"Saved summary JSON report to: {summary_file}")
-    
+        
+    update_status("Complete", 100, "completed")
     return summary_report
 
 if __name__ == "__main__":
-    # Conduct test call if run directly
-    print(analyze_city("Bengaluru"))
+    def print_progress(step, progress, status):
+        print(f"[{status.upper()}] {step} - {progress}%")
+    print(analyze_city("Bengaluru", status_callback=print_progress))

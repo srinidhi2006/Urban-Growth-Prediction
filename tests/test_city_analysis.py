@@ -103,4 +103,4 @@ def test_analyze_city_cached(mock_explainer, mock_exists, mock_read_csv, mock_op
         
         # Verify output files save triggers
         assert mock_to_csv.call_count == 2 # 1 for predictions, 1 for shap values
-        assert mock_json_dump.call_count == 1
+        assert mock_json_dump.call_count >= 1
