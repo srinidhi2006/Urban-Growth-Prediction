@@ -14,10 +14,13 @@ from pathlib import Path
 from loguru import logger
 from io import BytesIO
 
-# Import PDF report generation packages
+# Import PDF report generation flowable packages
 from reportlab.lib.pagesizes import letter
 from reportlab.pdfgen import canvas
 from reportlab.lib.utils import ImageReader
+from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle, PageBreak
+from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
+from reportlab.lib import colors
 
 # Import backend orchestrator modules
 from backend.city_analysis import analyze_city
@@ -115,7 +118,7 @@ st.markdown("""
 PROJECT_ROOT = Config.PROJECT_ROOT
 PREDICTIONS_DIR = PROJECT_ROOT / "results" / "predictions"
 
-# Pipeline Stages definitions for detailed progress logs
+# Pipeline Stages definitions for progress logs
 STAGES = [
     ("Downloading administrative boundary", 10, 10),
     ("Downloading OSM data", 20, 15),
@@ -123,7 +126,7 @@ STAGES = [
     ("Generating spatial grid", 40, 5),
     ("Joining spatial data", 50, 5),
     ("Extracting OSM features", 60, 10),
-    ("Generating Sentinel imagery", 70, 30), # GEE download stage
+    ("Generating Sentinel imagery", 70, 30),
     ("Extracting raster features", 80, 15),
     ("Generating ML feature dataset", 85, 5),
     ("Loading trained production model", 92, 5),
@@ -132,20 +135,50 @@ STAGES = [
     ("Finalizing results", 99, 2)
 ]
 
-# Normalization mapping for standard aliases
-ALIAS_MAPPING = {
-    "bombay": "Mumbai",
-    "bangalore": "Bengaluru",
-    "mysore": "Mysuru",
-    "new delhi": "Delhi",
-    "madras": "Chennai",
-    "calcutta": "Kolkata",
-    "poona": "Pune"
-}
+# NumberedCanvas subclass to handle page headers, footers, and page numbers dynamically
+class NumberedCanvas(canvas.Canvas):
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self._saved_page_states = []
 
-def normalize_city_name(name: str) -> str:
-    cleaned = name.strip().lower()
-    return ALIAS_MAPPING.get(cleaned, name.strip())
+    def showPage(self):
+        self._saved_page_states.append(dict(self.__dict__))
+        self._startPage()
+
+    def save(self):
+        num_pages = len(self._saved_page_states)
+        for state in self._saved_page_states:
+            self.__dict__.update(state)
+            self.draw_page_decorations(num_pages)
+            super().showPage()
+        super().save()
+
+    def draw_page_decorations(self, page_count):
+        # We suppress headers and footers on the cover page (Page 1)
+        if self._pageNumber > 1:
+            self.saveState()
+            
+            # Draw Header
+            self.setFont("Helvetica-Bold", 8)
+            self.setFillColor(colors.HexColor("#334155"))
+            self.drawString(50, 755, "Urban Growth Assessment Report")
+            
+            city_name = st.session_state.get("active_city", "City")
+            self.setFont("Helvetica", 8)
+            self.drawRightString(562, 755, f"Location: {city_name} | Target: 2026")
+            
+            self.setStrokeColor(colors.HexColor("#e2e8f0"))
+            self.setLineWidth(0.5)
+            self.line(50, 748, 562, 748)
+            
+            # Draw Footer
+            self.line(50, 48, 562, 48)
+            self.setFont("Helvetica", 8)
+            self.setFillColor(colors.HexColor("#64748b"))
+            self.drawString(50, 35, "Urban Growth Intelligence Platform")
+            self.drawRightString(562, 35, f"Page {self._pageNumber} of {page_count}")
+            
+            self.restoreState()
 
 def geocode_city_boundary_frontend(city_name: str) -> bool:
     boundary_path = Config.BOUNDARIES_DIR / f"{city_name}.geojson"
@@ -176,11 +209,21 @@ def geocode_city_boundary_frontend(city_name: str) -> bool:
     return False
 
 def assign_locality_names(grid_gdf, city_name) -> dict:
-    """Performs spatial reverse-geocoding to resolve locality names using OSM place tags."""
-    cache_path = Config.FEATURES_DIR / f"{city_name.lower()}_localities.json"
-    if cache_path.exists():
+    """Performs spatial reverse-geocoding to resolve locality names using offline caches or OSM APIs."""
+    normalized = normalize_city_name(city_name)
+    
+    # 1. Load from Offline cache CSVs first for Bengaluru, Hyderabad, Pune
+    if normalized in ["Bengaluru", "Hyderabad", "Pune"]:
+        cache_csv_path = PROJECT_ROOT / "data" / "cache" / f"{normalized.lower()}_localities.csv"
+        if cache_csv_path.exists():
+            df_cache = pd.read_csv(cache_csv_path)
+            return dict(zip(df_cache["grid_id"].astype(str), df_cache["locality_name"].astype(str)))
+            
+    # 2. Check JSON cache for other cities
+    cache_json_path = Config.FEATURES_DIR / f"{normalized.lower()}_localities.json"
+    if cache_json_path.exists():
         try:
-            with open(cache_path, "r") as f:
+            with open(cache_json_path, "r") as f:
                 return json.load(f)
         except Exception:
             pass
@@ -212,7 +255,7 @@ def assign_locality_names(grid_gdf, city_name) -> dict:
     result = dict(zip(grid_ids, locality_names))
     
     try:
-        with open(cache_path, "w") as f:
+        with open(cache_json_path, "w") as f:
             json.dump(result, f)
     except Exception:
         pass
@@ -276,7 +319,6 @@ def generate_ai_insights(city_name: str, summary: dict) -> str:
 
 def generate_pdf_charts(summary):
     """Generates Matplotlib charts in memory for PDF reports."""
-    # 1. Pie chart
     fig, ax = plt.subplots(figsize=(3, 3))
     labels = ['Low', 'Medium', 'High']
     sizes = [summary['low_growth_count'], summary['medium_growth_count'], summary['high_growth_count']]
@@ -290,7 +332,6 @@ def generate_pdf_charts(summary):
     plt.close()
     pie_buf.seek(0)
     
-    # 2. Bar chart
     fig, ax = plt.subplots(figsize=(4, 3))
     categories = ['Low', 'Medium', 'High']
     values = [summary['low_growth_count'], summary['medium_growth_count'], summary['high_growth_count']]
@@ -307,109 +348,197 @@ def generate_pdf_charts(summary):
     return pie_buf, bar_buf
 
 def generate_complete_pdf_report(city_name: str, summary: dict, df_preds: pd.DataFrame, df_shap: pd.DataFrame, localities: dict) -> bytes:
-    """Generates a professional multi-page executive assessment report."""
+    """Generates a professional multi-page executive assessment report with flowable auto-wrapping layout."""
     buffer = BytesIO()
-    p = canvas.Canvas(buffer, pagesize=letter)
     
-    # Pre-calculate splits
-    total_grids = summary["number_of_grids"]
-    h_pct = (summary["high_growth_count"] / total_grids) * 100 if total_grids > 0 else 0
-    m_pct = (summary["medium_growth_count"] / total_grids) * 100 if total_grids > 0 else 0
-    l_pct = (summary["low_growth_count"] / total_grids) * 100 if total_grids > 0 else 0
+    # Define document geometry constraints
+    doc = SimpleDocTemplate(
+        buffer,
+        pagesize=letter,
+        leftMargin=50,
+        rightMargin=50,
+        topMargin=60,
+        bottomMargin=60
+    )
     
-    # Merge localities to df_preds
-    df_with_locs = df_preds.copy()
-    df_with_locs["Locality"] = df_with_locs["grid_id"].astype(str).map(localities)
+    styles = getSampleStyleSheet()
+    
+    # Custom styles definitions for clean typography
+    title_style = ParagraphStyle(
+        "CoverTitle",
+        parent=styles["Title"],
+        fontName="Helvetica-Bold",
+        fontSize=24,
+        leading=28,
+        textColor=colors.HexColor("#1e1b4b"),
+        alignment=0,
+        spaceAfter=15
+    )
+    subtitle_style = ParagraphStyle(
+        "CoverSubtitle",
+        parent=styles["Normal"],
+        fontName="Helvetica",
+        fontSize=12,
+        leading=16,
+        textColor=colors.HexColor("#475569"),
+        spaceAfter=30
+    )
+    h1_style = ParagraphStyle(
+        "SectionH1",
+        parent=styles["Heading1"],
+        fontName="Helvetica-Bold",
+        fontSize=14,
+        leading=18,
+        textColor=colors.HexColor("#1e3a8a"),
+        spaceBefore=15,
+        spaceAfter=8,
+        keepWithNext=True
+    )
+    h2_style = ParagraphStyle(
+        "SectionH2",
+        parent=styles["Heading2"],
+        fontName="Helvetica-Bold",
+        fontSize=11,
+        leading=15,
+        textColor=colors.HexColor("#0f172a"),
+        spaceBefore=10,
+        spaceAfter=5,
+        keepWithNext=True
+    )
+    body_style = ParagraphStyle(
+        "ReportBody",
+        parent=styles["Normal"],
+        fontName="Helvetica",
+        fontSize=9.5,
+        leading=14,
+        textColor=colors.HexColor("#334155"),
+        spaceAfter=6
+    )
+    bullet_style = ParagraphStyle(
+        "ReportBullet",
+        parent=body_style,
+        leftIndent=15,
+        firstLineIndent=-10,
+        spaceAfter=4
+    )
+    table_cell_style = ParagraphStyle(
+        "TableCell",
+        parent=styles["Normal"],
+        fontName="Helvetica",
+        fontSize=8.5,
+        leading=11,
+        textColor=colors.HexColor("#1e293b")
+    )
+    table_header_style = ParagraphStyle(
+        "TableHeader",
+        parent=table_cell_style,
+        fontName="Helvetica-Bold",
+        textColor=colors.HexColor("#ffffff")
+    )
+    
+    story = []
     
     # ---------------- PAGE 1: COVER PAGE ----------------
-    p.setFillColorRGB(0.09, 0.09, 0.2)
-    p.rect(0, 0, 612, 792, fill=1, stroke=0)
+    story.append(Spacer(1, 150))
+    story.append(Paragraph("Urban Growth Assessment Report", title_style))
+    story.append(Paragraph(f"Analysis Area: {city_name} — Timeline Target: 2026", subtitle_style))
     
-    p.setFillColorRGB(1.0, 1.0, 1.0)
-    p.setFont("Helvetica-Bold", 26)
-    p.drawString(50, 480, "Urban Growth Assessment Report")
-    
-    p.setFont("Helvetica", 14)
-    p.drawString(50, 440, f"Target Municipal Boundary: {city_name}")
-    p.drawString(50, 415, f"Overall Classification: {summary.get('overall_growth_level', 'Moderate expansion')}")
-    
-    p.setStrokeColorRGB(0.3, 0.3, 0.6)
-    p.line(50, 395, 550, 395)
-    
-    p.setFont("Helvetica", 10)
-    p.drawString(50, 100, "CONFIDENTIAL DOCUMENT FOR CITY PLANNERS")
-    p.drawString(50, 80, "Urban Growth Intelligence Platform — Technical Version 1.0")
-    
-    p.showPage()
+    # Cover page card block
+    kpi_data = [
+        [Paragraph("<b>Selected City:</b>", table_cell_style), Paragraph(city_name, table_cell_style)],
+        [Paragraph("<b>Growth Category:</b>", table_cell_style), Paragraph(summary.get("overall_growth_level", "Moderate"), table_cell_style)],
+        [Paragraph("<b>Analysis Date:</b>", table_cell_style), Paragraph("July 1, 2026", table_cell_style)],
+        [Paragraph("<b>Version:</b>", table_cell_style), Paragraph("v1.0", table_cell_style)]
+    ]
+    t_cover = Table(kpi_data, colWidths=[150, 200])
+    t_cover.setStyle(TableStyle([
+        ('BACKGROUND', (0,0), (-1,-1), colors.HexColor("#f8fafc")),
+        ('PADDING', (0,0), (-1,-1), 8),
+        ('BOX', (0,0), (-1,-1), 0.5, colors.HexColor("#e2e8f0")),
+        ('INNERGRID', (0,0), (-1,-1), 0.5, colors.HexColor("#f1f5f9")),
+    ]))
+    story.append(t_cover)
+    story.append(PageBreak())
     
     # ---------------- PAGE 2: EXECUTIVE SUMMARY & DISTRIBUTION ----------------
-    p.setFillColorRGB(0.1, 0.1, 0.1)
-    p.setFont("Helvetica-Bold", 18)
-    p.drawString(50, 740, "Executive Summary & Classification splits")
-    p.line(50, 730, 562, 730)
+    story.append(Paragraph("1. Executive Summary", h1_style))
+    story.append(Paragraph(
+        "This urban growth assessment report evaluates geographic expansions, infrastructural densities, "
+        "and spectral shift trends. The analysis indicates growth concentrations categorized as detailed below.",
+        body_style
+    ))
     
-    # Render KPI cards as layout boxes on canvas
-    kpi_boxes = [
-        ("Avg Growth Score", f"{summary['average_growth_score']:.4f}"),
-        ("Overall Category", f"{summary['overall_growth_level']}"),
-        ("Total Cells", f"{summary['number_of_grids']:,}"),
-        ("High Growth Count", f"{summary['high_growth_count']:,}"),
-        ("Medium Growth Count", f"{summary['medium_growth_count']:,}"),
-        ("Low Growth Count", f"{summary['low_growth_count']:,}")
+    # KPI metrics table cards (styled as 3x2 card grid)
+    kpis = [
+        [
+            Paragraph("<b>Average Growth Score</b><br/>" + f"{summary['average_growth_score']:.4f}", table_cell_style),
+            Paragraph("<b>Overall Category</b><br/>" + f"{summary['overall_growth_level']}", table_cell_style),
+            Paragraph("<b>Total Analysis Cells</b><br/>" + f"{summary['number_of_grids']:,}", table_cell_style)
+        ],
+        [
+            Paragraph("<b>High Growth Areas</b><br/>" + f"{summary['high_growth_count']:,}", table_cell_style),
+            Paragraph("<b>Medium Growth Areas</b><br/>" + f"{summary['medium_growth_count']:,}", table_cell_style),
+            Paragraph("<b>Low Growth Areas</b><br/>" + f"{summary['low_growth_count']:,}", table_cell_style)
+        ]
     ]
+    t_kpis = Table(kpis, colWidths=[164, 164, 164])
+    t_kpis.setStyle(TableStyle([
+        ('BACKGROUND', (0,0), (-1,-1), colors.HexColor("#f8fafc")),
+        ('BOX', (0,0), (-1,-1), 0.5, colors.HexColor("#cbd5e1")),
+        ('INNERGRID', (0,0), (-1,-1), 0.5, colors.HexColor("#e2e8f0")),
+        ('PADDING', (0,0), (-1,-1), 10),
+        ('ALIGN', (0,0), (-1,-1), 'CENTER')
+    ]))
+    story.append(t_kpis)
+    story.append(Spacer(1, 15))
     
-    y = 690
-    for idx, (label, val) in enumerate(kpi_boxes):
-        # Draw outline boxes
-        col = idx % 2
-        row = idx // 2
-        box_x = 50 + col * 260
-        box_y = y - row * 60
-        
-        p.setStrokeColorRGB(0.8, 0.8, 0.8)
-        p.rect(box_x, box_y, 240, 50, stroke=1, fill=0)
-        
-        p.setFont("Helvetica-Bold", 11)
-        p.drawString(box_x + 10, box_y + 30, val)
-        p.setFont("Helvetica", 8)
-        p.drawString(box_x + 10, box_y + 10, label)
-        
-    # Generate and draw charts
+    story.append(Paragraph("2. Growth Category split", h1_style))
     pie_buf, bar_buf = generate_pdf_charts(summary)
-    p.drawImage(ImageReader(pie_buf), 50, 260, width=220, height=220)
-    p.drawImage(ImageReader(bar_buf), 300, 260, width=240, height=180)
-    
-    p.showPage()
+    t_charts = Table([
+        [ImageReader(pie_buf), ImageReader(bar_buf)]
+    ], colWidths=[240, 250])
+    t_charts.setStyle(TableStyle([
+        ('ALIGN', (0,0), (-1,-1), 'CENTER'),
+        ('VALIGN', (0,0), (-1,-1), 'MIDDLE')
+    ]))
+    story.append(t_charts)
+    story.append(PageBreak())
     
     # ---------------- PAGE 3: TEMPORAL COMPARISON ----------------
-    p.setFont("Helvetica-Bold", 18)
-    p.drawString(50, 740, "Temporal Imagery comparison (2019 vs 2026)")
-    p.line(50, 730, 562, 730)
+    story.append(Paragraph("3. Temporal Satellite Shifts (2019 vs 2026)", h1_style))
+    story.append(Paragraph(
+        "Grouped Sentinel-2 surface reflectance imagery comparison across target years:",
+        body_style
+    ))
     
-    # Check for processed images inside project directories
     dir_2019 = Config.PROCESSED_DIR / "sentinel" / city_name / "2019"
     dir_2026 = Config.PROCESSED_DIR / "sentinel" / city_name / "2026"
-    
     img_2019 = dir_2019 / f"{city_name}_2019_preview.png"
     img_2026 = dir_2026 / f"{city_name}_2026_preview.png"
     
-    # Draw side-by-side sentinel composite renders
     if img_2019.exists() and img_2026.exists():
-        p.drawImage(ImageReader(str(img_2019)), 50, 480, width=240, height=180)
-        p.drawString(50, 460, "A. 2019 RGB Satellite Composite")
+        t_images = Table([
+            [ImageReader(str(img_2019)), ImageReader(str(img_2026))]
+        ], colWidths=[240, 240])
+        t_images.setStyle(TableStyle([
+            ('ALIGN', (0,0), (-1,-1), 'CENTER'),
+            ('VALIGN', (0,0), (-1,-1), 'MIDDLE')
+        ]))
+        story.append(t_images)
         
-        p.drawImage(ImageReader(str(img_2026)), 310, 480, width=240, height=180)
-        p.drawString(310, 460, "B. 2026 RGB Satellite Composite")
+        # Sub-labels table
+        t_labels = Table([
+            [Paragraph("<b>A. 2019 RGB Satellite Composite</b>", table_cell_style), 
+             Paragraph("<b>B. 2026 RGB Satellite Composite</b>", table_cell_style)]
+        ], colWidths=[240, 240])
+        t_labels.setStyle(TableStyle([('ALIGN', (0,0), (-1,-1), 'CENTER')]))
+        story.append(t_labels)
     else:
-        p.setFont("Helvetica-Oblique", 11)
-        p.drawString(70, 560, "[Simulated preview: Image sources cached offline]")
+        story.append(Paragraph("<i>[Satellite preview image sources cached offline]</i>", body_style))
         
-    # Spectral comparison stats
-    p.setFont("Helvetica-Bold", 14)
-    p.drawString(50, 390, "Spectral Index Shift delta Analysis")
-    p.line(50, 380, 562, 380)
+    story.append(Spacer(1, 15))
+    story.append(Paragraph("4. Pre-Post Spectral Indices Shifts", h1_style))
     
-    # Get spectral shifts
     city_features_path = Config.FEATURES_DIR / f"{city_name.lower()}_growth_dataset.csv"
     if city_features_path.exists():
         df_feat = pd.read_csv(city_features_path)
@@ -419,115 +548,167 @@ def generate_complete_pdf_report(city_name: str, summary: dict, df_preds: pd.Dat
             "mean_ndwi_2019", "mean_ndwi_2026"
         ]].mean()
         
-        spectral_metrics = [
-            f"Mean Vegetation Index (NDVI):  2019 = {avg_spectral['mean_ndvi_2019']:.4f}  |  2026 = {avg_spectral['mean_ndvi_2026']:.4f}",
-            f"Mean Built-up Index (NDBI):   2019 = {avg_spectral['mean_ndbi_2019']:.4f}  |  2026 = {avg_spectral['mean_ndbi_2026']:.4f}",
-            f"Mean Moisture Index (NDWI):   2019 = {avg_spectral['mean_ndwi_2019']:.4f}  |  2026 = {avg_spectral['mean_ndwi_2026']:.4f}"
+        spec_data = [
+            [Paragraph("<b>Spectral Index</b>", table_header_style), Paragraph("<b>2019 Mean</b>", table_header_style), Paragraph("<b>2026 Mean</b>", table_header_style), Paragraph("<b>Delta Shift</b>", table_header_style)],
+            [Paragraph("Vegetation (NDVI)", table_cell_style), Paragraph(f"{avg_spectral['mean_ndvi_2019']:.4f}", table_cell_style), Paragraph(f"{avg_spectral['mean_ndvi_2026']:.4f}", table_cell_style), Paragraph(f"{avg_spectral['mean_ndvi_2026'] - avg_spectral['mean_ndvi_2019']:.4f}", table_cell_style)],
+            [Paragraph("Built-up structures (NDBI)", table_cell_style), Paragraph(f"{avg_spectral['mean_ndbi_2019']:.4f}", table_cell_style), Paragraph(f"{avg_spectral['mean_ndbi_2026']:.4f}", table_cell_style), Paragraph(f"{avg_spectral['mean_ndbi_2026'] - avg_spectral['mean_ndbi_2019']:.4f}", table_cell_style)],
+            [Paragraph("Hydrological Moisture (NDWI)", table_cell_style), Paragraph(f"{avg_spectral['mean_ndwi_2019']:.4f}", table_cell_style), Paragraph(f"{avg_spectral['mean_ndwi_2026']:.4f}", table_cell_style), Paragraph(f"{avg_spectral['mean_ndwi_2026'] - avg_spectral['mean_ndwi_2019']:.4f}", table_cell_style)],
         ]
-        p.setFont("Helvetica", 10)
-        y_sp = 340
-        for sm in spectral_metrics:
-            p.drawString(70, y_sp, sm)
-            y_sp -= 25
-            
-    p.showPage()
+        t_spec = Table(spec_data, colWidths=[150, 110, 110, 110])
+        t_spec.setStyle(TableStyle([
+            ('BACKGROUND', (0,0), (-1,0), colors.HexColor("#1e3a8a")),
+            ('BOX', (0,0), (-1,-1), 0.5, colors.HexColor("#cbd5e1")),
+            ('INNERGRID', (0,0), (-1,-1), 0.5, colors.HexColor("#cbd5e1")),
+            ('PADDING', (0,0), (-1,-1), 6),
+        ]))
+        story.append(t_spec)
+        
+    story.append(PageBreak())
     
-    # ---------------- PAGE 4: HOTSPOTS & STABLE AREAS ----------------
-    p.setFont("Helvetica-Bold", 18)
-    p.drawString(50, 740, "Growth Hotspots & Stable Area Locations")
-    p.line(50, 730, 562, 730)
+    # ---------------- PAGE 4: FUTURE DEVELOPMENT PRIORITY AREAS ----------------
+    story.append(Paragraph("5. Future Development Priority Areas", h1_style))
+    story.append(Paragraph(
+        "<i>*Important Note: The priority rankings below are derived from predicted 2026 growth scores "
+        "to assist municipal urban planners in targeting infrastructure funding. This is NOT a future-year forecast "
+        "beyond the analysis year 2026.*</i>",
+        body_style
+    ))
     
-    # Hotspots Table
+    # Merge localities to prediction table
+    df_with_locs = df_preds.copy()
+    df_with_locs["Locality"] = df_with_locs["grid_id"].astype(str).map(localities)
+    
+    # Hotspots table
     df_hot = df_with_locs.sort_values(by="growth_score", ascending=False).head(5)
-    p.setFont("Helvetica-Bold", 13)
-    p.drawString(50, 700, "1. Top Growth Hotspots (Fastest expansion)")
     
-    y_h = 665
+    hot_headers = [
+        Paragraph("<b>Rank</b>", table_header_style),
+        Paragraph("<b>Locality Name</b>", table_header_style),
+        Paragraph("<b>Score</b>", table_header_style),
+        Paragraph("<b>Category</b>", table_header_style),
+        Paragraph("<b>Probability</b>", table_header_style),
+        Paragraph("<b>Planning Recommendation</b>", table_header_style)
+    ]
+    hot_rows = [hot_headers]
     for idx, (_, row) in enumerate(df_hot.iterrows()):
-        locality = row["Locality"] if pd.notna(row["Locality"]) else f"Area Grid {row['grid_id']}"
-        p.setFont("Helvetica-Bold", 10)
-        p.drawString(60, y_h, f"{idx+1}. Locality: {locality}  |  Score: {row['growth_score']:.4f}")
+        loc_name = row["Locality"] if pd.notna(row["Locality"]) else f"Grid Sector {row['grid_id']}"
+        score = f"{row['growth_score']:.4f}"
+        cat = row["predicted_growth_category"]
+        prob = f"{row['prediction_probability']:.1%}"
         
-        # Build translated reasons
-        grid_shap = df_shap[df_shap["grid_id"].astype(str) == str(row["grid_id"])].iloc[0]
-        shap_feats = [c for c in df_shap.columns if c != "grid_id"]
-        sorted_shap = grid_shap[shap_feats].astype(float).sort_values(key=abs, ascending=False)
-        reasons = translate_shap_features(sorted_shap)
-        reason_str = ", ".join(reasons) if reasons else "Infrastructure and built-up shifts."
+        # Determine customized recommendation based on category/locality
+        if idx == 0:
+            rec = "Prioritize transportation expansion, public infrastructure, and utility planning."
+        elif idx == 1:
+            rec = "Monitor commercial growth expansion and improve roadway connectivity."
+        elif idx == 2:
+            rec = "Plan for residential growth while preserving green buffer zones."
+        else:
+            rec = "Develop local infrastructure support cells and utility connections."
+            
+        hot_rows.append([
+            Paragraph(str(idx+1), table_cell_style),
+            Paragraph(loc_name, table_cell_style),
+            Paragraph(score, table_cell_style),
+            Paragraph(cat, table_cell_style),
+            Paragraph(prob, table_cell_style),
+            Paragraph(rec, table_cell_style)
+        ])
         
-        p.setFont("Helvetica-Oblique", 9)
-        p.drawString(80, y_h - 14, f"Reason: {reason_str}")
-        y_h -= 35
-        
-    # Stable Areas Table
-    df_stable = df_with_locs.sort_values(by="growth_score", ascending=True).head(5)
-    p.setFont("Helvetica-Bold", 13)
-    p.drawString(50, y_h - 10, "2. Top Stable Areas (Lowest development change)")
+    t_hot = Table(hot_rows, colWidths=[35, 95, 45, 55, 60, 200])
+    t_hot.setStyle(TableStyle([
+        ('BACKGROUND', (0,0), (-1,0), colors.HexColor("#1e3a8a")),
+        ('BOX', (0,0), (-1,-1), 0.5, colors.HexColor("#cbd5e1")),
+        ('INNERGRID', (0,0), (-1,-1), 0.5, colors.HexColor("#cbd5e1")),
+        ('PADDING', (0,0), (-1,-1), 6),
+        ('VALIGN', (0,0), (-1,-1), 'MIDDLE')
+    ]))
+    story.append(Paragraph("Top 5 Growth Hotspots (Highest Development Priority)", h2_style))
+    story.append(t_hot)
+    story.append(Spacer(1, 10))
     
-    y_s = y_h - 45
+    # Stable Areas table
+    df_stable = df_with_locs.sort_values(by="growth_score", ascending=True).head(5)
+    stable_rows = [hot_headers]
     for idx, (_, row) in enumerate(df_stable.iterrows()):
-        locality = row["Locality"] if pd.notna(row["Locality"]) else f"Area Grid {row['grid_id']}"
-        p.setFont("Helvetica-Bold", 10)
-        p.drawString(60, y_s, f"{idx+1}. Locality: {locality}  |  Score: {row['growth_score']:.4f}")
+        loc_name = row["Locality"] if pd.notna(row["Locality"]) else f"Grid Sector {row['grid_id']}"
+        score = f"{row['growth_score']:.4f}"
+        cat = row["predicted_growth_category"]
+        prob = f"{row['prediction_probability']:.1%}"
         
-        grid_shap = df_shap[df_shap["grid_id"].astype(str) == str(row["grid_id"])].iloc[0]
-        shap_feats = [c for c in df_shap.columns if c != "grid_id"]
-        sorted_shap = grid_shap[shap_feats].astype(float).sort_values(key=abs, ascending=False)
-        reasons = translate_shap_features(sorted_shap)
-        reason_str = ", ".join(reasons) if reasons else "Stable vegetation and infrastructure footprint."
+        rec = "Recommend environmental conservation and highly controlled development zoning."
+        stable_rows.append([
+            Paragraph(str(idx+1), table_cell_style),
+            Paragraph(loc_name, table_cell_style),
+            Paragraph(score, table_cell_style),
+            Paragraph(cat, table_cell_style),
+            Paragraph(prob, table_cell_style),
+            Paragraph(rec, table_cell_style)
+        ])
         
-        p.setFont("Helvetica-Oblique", 9)
-        p.drawString(80, y_s - 14, f"Reason: {reason_str}")
-        y_s -= 35
-        
-    p.showPage()
+    t_stable = Table(stable_rows, colWidths=[35, 95, 45, 55, 60, 200])
+    t_stable.setStyle(TableStyle([
+        ('BACKGROUND', (0,0), (-1,0), colors.HexColor("#1e293b")),
+        ('BOX', (0,0), (-1,-1), 0.5, colors.HexColor("#cbd5e1")),
+        ('INNERGRID', (0,0), (-1,-1), 0.5, colors.HexColor("#cbd5e1")),
+        ('PADDING', (0,0), (-1,-1), 6),
+        ('VALIGN', (0,0), (-1,-1), 'MIDDLE')
+    ]))
+    story.append(Paragraph("Top 5 Stable Areas (Highest Environmental Protection Priority)", h2_style))
+    story.append(t_stable)
+    story.append(PageBreak())
     
     # ---------------- PAGE 5: INSIGHTS & PLANNING RECOMMENDATIONS ----------------
-    p.setFont("Helvetica-Bold", 18)
-    p.drawString(50, 740, "Urban Planning Recommendations & AI Insights")
-    p.line(50, 730, 562, 730)
+    story.append(Paragraph("6. AI Urban Insights & Planning Recommendations", h1_style))
+    story.append(Paragraph(
+        "Executive planning observations detailing change dynamics suitable for municipal planners:",
+        body_style
+    ))
     
-    # Insights
-    p.setFont("Helvetica-Bold", 12)
-    p.drawString(50, 700, "AI Urban Insights Report:")
-    
-    insights_str = generate_ai_insights(city_name, summary)
-    # Renders in multiple lines safely
-    p.setFont("Helvetica", 10)
-    y_in = 675
-    for line in insights_str.split(". "):
+    # AI insights paragraphs
+    insights_text = generate_ai_insights(city_name, summary)
+    for line in insights_text.split(". "):
         if line.strip():
-            p.drawString(70, y_in, f"- {line.strip()}.")
-            y_in -= 18
+            story.append(Paragraph(f"• {line.strip()}.", bullet_style))
             
-    # Planning recommendations
-    p.setFont("Helvetica-Bold", 12)
-    p.drawString(50, y_in - 10, "Urban Planning Guidelines:")
+    story.append(Spacer(1, 10))
+    story.append(Paragraph("7. Explainable AI Feature Drivers (SHAP Methodology)", h1_style))
+    story.append(Paragraph(
+        "Instead of raw feature variables, the XGBoost classification predictions are explained using "
+        "game-theoretic SHAP weights mapped directly onto intuitive planning indicators:",
+        body_style
+    ))
     
-    recs = [
-        "Infrastructure Infill Planning: Target transportation nodes and high-growth hotspots with expansion grids.",
-        "Future Development Areas: Moderate score sectors provide stable zones with infrastructure proximity.",
-        "Environmental Protections: NDVI loss zones require vegetation buffers to prevent urban heat dome spikes.",
-        "Continuous Monitoring: Regularly update multi-spectral indices to catch boundary shifts early."
+    drivers_list = [
+        "<b>Increased built-up footprint:</b> Corresponds to infrastructural expansion, asphalt cover, and buildings density indices.",
+        "<b>Expansion of road networks:</b> Renders increased connectivity, intersections count, and roadway length variables.",
+        "<b>Decline in vegetation canopy:</b> Shows land clearing and green cover degradation metrics.",
+        "<b>Reduction in surface moisture:</b> Shows hydrological changes, water bodies buffer shifts, and NDWI indices."
     ]
-    y_rc = y_in - 35
-    for rec in recs:
-        p.drawString(70, y_rc, f"• {rec}")
-        y_rc -= 18
+    for dr in drivers_list:
+        story.append(Paragraph(dr, bullet_style))
         
-    # SHAP Explanations (Methodology details)
-    p.setFont("Helvetica-Bold", 12)
-    p.drawString(50, y_rc - 10, "Appendix: Model & Explanations Details")
-    p.line(50, y_rc - 18, 562, y_rc - 18)
+    story.append(Spacer(1, 10))
+    story.append(Paragraph("8. Appendix: Platform Baseline Model Specifications", h1_style))
     
-    p.setFont("Helvetica", 9)
-    y_ap = y_rc - 35
-    p.drawString(70, y_ap, "Model Baseline Classifier Accuracy: 95.76%  |  Macro F1 Score: 95.74%")
-    p.drawString(70, y_ap - 15, "Explainability uses TreeExplainer algorithms representing local game-theory feature contributions.")
-    p.drawString(70, y_ap - 30, "Report generated automatically by the Urban Growth Intelligence Platform backend system.")
+    spec_rows = [
+        [Paragraph("<b>Performance Metric</b>", table_header_style), Paragraph("<b>XGBoost Baseline Value</b>", table_header_style)],
+        [Paragraph("Classification Accuracy", table_cell_style), Paragraph("95.76%", table_cell_style)],
+        [Paragraph("Macro Precision Score", table_cell_style), Paragraph("95.74%", table_cell_style)],
+        [Paragraph("Macro Recall Score", table_cell_style), Paragraph("95.75%", table_cell_style)],
+        [Paragraph("F1 Score (macro)", table_cell_style), Paragraph("95.74%", table_cell_style)]
+    ]
+    t_spec_table = Table(spec_rows, colWidths=[240, 240])
+    t_spec_table.setStyle(TableStyle([
+        ('BACKGROUND', (0,0), (-1,0), colors.HexColor("#1e3a8a")),
+        ('BOX', (0,0), (-1,-1), 0.5, colors.HexColor("#cbd5e1")),
+        ('INNERGRID', (0,0), (-1,-1), 0.5, colors.HexColor("#cbd5e1")),
+        ('PADDING', (0,0), (-1,-1), 5),
+    ]))
+    story.append(t_spec_table)
     
-    p.showPage()
-    p.save()
+    # Build document
+    doc.build(story, canvasmaker=NumberedCanvas)
     buffer.seek(0)
     return buffer.getvalue()
 
@@ -561,9 +742,9 @@ if page == "Home":
     st.markdown("### ⚙️ Multi-Stage Processing Pipeline")
     st.markdown(
         """
-        - **Administrative Boundary Geocoding** - Geocodes city polygons via Nominatim coordinate systems.
-        - **OSM Spatial Data Downloader** - Ingests infrastructure networks (buildings, road lines, highways).
-        - **Sentinel-2 Multi-Spectral Ingestion** - Processes cloud-masked surface reflectance composites inside GEE.
+        - **Administrative Boundary Geocoding** - Geocodes city boundaries via Nominatim coordinate systems.
+        - **OSM Spatial Data Ingestion** - Ingests infrastructure networks (buildings, road lines, highways).
+        - **Sentinel-2 Multi-Spectral Ingestion** - Processes cloud-masked surface reflectance composites.
         - **Classification Model** - Feeds feature vectors to the baseline XGBoost classifier.
         - **SHAP Explanation Logging** - Computes local feature influence drivers.
         """
@@ -606,15 +787,15 @@ elif page == "Analyze City":
         else:
             normalized_city = normalize_city_name(city_input)
             
-            # Resolve geocoding variants
+            # Resolve geocoding boundary polygon variants
             boundary_resolved = geocode_city_boundary_frontend(normalized_city)
             if not boundary_resolved:
                 st.error(
                     f"❌ Geocoding Failed: Could not retrieve administrative boundary polygon for '{city_input}'. "
-                    "Please check spelling, or try appending the state details (e.g. 'Mysuru, Karnataka')."
+                    "Please check spelling, or try adding state details (e.g. 'Mysuru, Karnataka')."
                 )
             else:
-                # Setup stages indicators progress checks list
+                # Setup progress checklist milestones container
                 progress_container = st.container()
                 with progress_container:
                     status_placeholder = st.empty()
@@ -658,7 +839,7 @@ elif page == "Analyze City":
                         if progress < 100:
                             lines.append(f"⏱️ **Estimated time remaining:** ~`{rem_est} seconds`")
                             if is_gee_stage:
-                                lines.append("<div style='color: #f59e0b; font-size: 0.85rem; margin-top: 0.5rem;'>⚠️ *This step may take several minutes depending on image availability and GEE latency.*</div>")
+                                lines.append("<div style='color: #f59e0b; font-size: 0.85rem; margin-top: 0.5rem;'>⚠️ *This step may take several minutes depending on image availability and GEE server latency.*</div>")
                         else:
                             lines.append("🎉 **Pipeline completed successfully!**")
                             
@@ -669,7 +850,7 @@ elif page == "Analyze City":
                         summary = analyze_city(normalized_city, status_callback=st_callback)
                         progress_container.empty()
                         
-                        # Load prediction table and GeoJSON
+                        # Load predictions dataset and spatial boundaries
                         df_preds = pd.read_csv(Path(summary["prediction_file"]))
                         geojson_path = Config.FEATURES_DIR / f"osm_features_{normalized_city}.geojson"
                         
@@ -799,7 +980,12 @@ elif page == "Dashboard":
                 pickable=True
             )
             
-            centroid = gdf_merged.geometry.unary_union.centroid
+            # Support GeoPandas 1.0 union_all() deprecation replacement
+            if hasattr(gdf_merged, "union_all"):
+                centroid = gdf_merged.geometry.union_all().centroid
+            else:
+                centroid = gdf_merged.geometry.unary_union.centroid
+                
             view_state = pdk.ViewState(
                 latitude=centroid.y,
                 longitude=centroid.x,
@@ -827,7 +1013,6 @@ elif page == "Dashboard":
         if shap_file_path.exists():
             df_shap = pd.read_csv(shap_file_path)
             
-            # Map grid IDs to Locality Names for cleaner user selection dropdown
             df_with_locs = df_preds.copy()
             df_with_locs["Locality"] = df_with_locs["grid_id"].astype(str).map(localities)
             df_with_locs["Display"] = df_with_locs["Locality"] + " (Grid " + df_with_locs["grid_id"] + ")"
@@ -858,7 +1043,6 @@ elif page == "Dashboard":
             shap_feats = [c for c in df_shap.columns if c != "grid_id"]
             cell_shap_series = cell_shap[shap_feats].astype(float)
             
-            # Translate SHAP features to readable language
             readable_reasons = translate_shap_features(cell_shap_series.sort_values(key=abs, ascending=False))
             st.markdown("**Core driver factors for this forecast:**")
             for reason in readable_reasons:
@@ -882,7 +1066,6 @@ elif page == "Dashboard":
             fig_shap.update_layout(paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)", font_color="#e2e8f0")
             st.plotly_chart(fig_shap, use_container_width=True)
             
-            # Displays spectral values
             st.markdown("#### Cell Spectral Shift Indicators")
             ss_col1, ss_col2, ss_col3 = st.columns(3)
             ss_col1.metric("NDVI Delta (Vegetation)", f"{cell_features['delta_ndvi']:.4f}")
@@ -894,7 +1077,6 @@ elif page == "Dashboard":
         
         chart_col1, chart_col2 = st.columns(2)
         with chart_col1:
-            # 1. Distribution Donut Chart
             fig_pie = px.pie(
                 names=["Low", "Medium", "High"],
                 values=[summary["low_growth_count"], summary["medium_growth_count"], summary["high_growth_count"]],
@@ -906,7 +1088,6 @@ elif page == "Dashboard":
             fig_pie.update_layout(paper_bgcolor="rgba(0,0,0,0)", font_color="#e2e8f0")
             st.plotly_chart(fig_pie, use_container_width=True)
             
-            # 2. Spectral shift comparison charts
             if city_features_path.exists():
                 df_feat = pd.read_csv(city_features_path)
                 
@@ -944,7 +1125,6 @@ elif page == "Dashboard":
                 st.plotly_chart(fig_ndwi, use_container_width=True)
                 
         with chart_col2:
-            # 3. Growth score histogram
             fig_hist = px.histogram(
                 df_preds,
                 x="growth_score",
@@ -955,7 +1135,6 @@ elif page == "Dashboard":
             fig_hist.update_layout(paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)", font_color="#e2e8f0")
             st.plotly_chart(fig_hist, use_container_width=True)
             
-            # 4. Global SHAP Feature Importance chart
             if shap_file_path.exists():
                 feat_cols = [c for c in df_shap.columns if c != "grid_id"]
                 mean_abs_shap = df_shap[feat_cols].abs().mean().sort_values(ascending=False)
@@ -1000,13 +1179,10 @@ elif page == "Report":
         
         st.markdown(f"## 📥 Download Assessment Reports: {city_name}")
         
-        # Load SHAP file
         shap_file_path = Path(summary["shap_file"])
         df_shap = pd.read_csv(shap_file_path) if shap_file_path.exists() else None
         
-        # Draw Report Exporters buttons
-        st.markdown("Select from the output format options below:")
-        
+        # Draw Report Exporters PDF download button
         pdf_data = generate_complete_pdf_report(city_name, summary, df_preds, df_shap, localities)
         st.download_button(
             label="📥 Download Executive Assessment Summary PDF Report",
@@ -1015,15 +1191,6 @@ elif page == "Report":
             mime="application/pdf"
         )
         
-        if df_shap is not None:
-            shap_txt = generate_shap_report_txt(city_name, df_shap)
-            st.download_button(
-                label="📥 Download SHAP Explanation Report (.txt)",
-                data=shap_txt,
-                file_name=f"{city_name.lower()}_shap_explanation.txt",
-                mime="text/plain"
-            )
-            
         with open(summary["prediction_file"], "rb") as f:
             st.download_button(
                 label="📥 Download Prediction CSV results table",
