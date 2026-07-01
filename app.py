@@ -18,7 +18,7 @@ from io import BytesIO
 from reportlab.lib.pagesizes import letter
 from reportlab.pdfgen import canvas
 from reportlab.lib.utils import ImageReader
-from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle, PageBreak
+from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle, PageBreak, Image as RLImage
 from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
 from reportlab.lib import colors
 
@@ -510,7 +510,7 @@ def generate_complete_pdf_report(city_name: str, summary: dict, df_preds: pd.Dat
     story.append(Paragraph("2. Growth Category split", h1_style))
     pie_buf, bar_buf = generate_pdf_charts(summary)
     t_charts = Table([
-        [ImageReader(pie_buf), ImageReader(bar_buf)]
+        [RLImage(pie_buf, width=220, height=220), RLImage(bar_buf, width=240, height=180)]
     ], colWidths=[240, 250])
     t_charts.setStyle(TableStyle([
         ('ALIGN', (0,0), (-1,-1), 'CENTER'),
@@ -533,7 +533,7 @@ def generate_complete_pdf_report(city_name: str, summary: dict, df_preds: pd.Dat
     
     if img_2019.exists() and img_2026.exists():
         t_images = Table([
-            [ImageReader(str(img_2019)), ImageReader(str(img_2026))]
+            [RLImage(str(img_2019), width=240, height=180), RLImage(str(img_2026), width=240, height=180)]
         ], colWidths=[240, 240])
         t_images.setStyle(TableStyle([
             ('ALIGN', (0,0), (-1,-1), 'CENTER'),
