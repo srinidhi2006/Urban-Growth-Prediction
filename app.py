@@ -9,6 +9,8 @@ import osmnx as ox
 import pydeck as pdk
 import plotly.express as px
 import plotly.graph_objects as go
+import matplotlib
+matplotlib.use('Agg')
 import matplotlib.pyplot as plt
 from pathlib import Path
 from loguru import logger
@@ -881,6 +883,7 @@ elif page == "Analyze City":
                         st.session_state["active_summary"] = summary
                         st.session_state["active_preds"] = df_preds
                         st.session_state["active_localities"] = localities
+                        st.session_state["active_pdf_data"] = None
                         
                         st.success(f"Analysis completed successfully for {normalized_city}! Navigate to the 'Dashboard' screen to view spatial maps and SHAP driver explanations.")
                         
@@ -1198,7 +1201,13 @@ elif page == "Report":
         df_shap = pd.read_csv(shap_file_path) if shap_file_path.exists() else None
         
         # Draw Report Exporters PDF download button
-        pdf_data = generate_complete_pdf_report(city_name, summary, df_preds, df_shap, localities)
+        if st.session_state.get("active_pdf_data") is None:
+            with st.spinner("Generating PDF report..."):
+                pdf_data = generate_complete_pdf_report(city_name, summary, df_preds, df_shap, localities)
+                st.session_state["active_pdf_data"] = pdf_data
+        else:
+            pdf_data = st.session_state["active_pdf_data"]
+            
         st.download_button(
             label="📥 Download Executive Assessment Summary PDF Report",
             data=pdf_data,
